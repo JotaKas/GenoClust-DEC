@@ -9,36 +9,21 @@ from keras import callbacks
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
-#from mpl_toolkits.mplot3d import Axes3D
-#import plotly.graph_objects as go
 from sklearn.manifold import TSNE as sklearn_TSNE
-#from openTSNE import TSNE as openTSNE
-#from MulticoreTSNE import MulticoreTSNE as MulticoreTSNE
-#from DenPeakcode import DenPeakCluster
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.model_selection import train_test_split
+from sklearn.utils import resample
 from denmune import DenMune
 import pandas as pd
+from scipy.spatial.distance import pdist, squareform, cdist
+from keras.models import load_model
+from joblib import Parallel, delayed
+#import dbcv WHILE I DONT SOLVE THE NUMPY PROBLEM
+from cdbw import CDbw
+from collections import Counter
+import warnings
+
 K.set_image_data_format('channels_last')  # This remains unchanged
-
-def autoencoder(dims, act='relu', init='glorot_uniform'):
-    """
-    Fully connected auto-encoder model, symmetric, adapted for genomic data.
-    """
-    n_stacks = len(dims) - 1
-    x = Input(shape=(dims[0],), name='input')
-    h = x
-
-    for i in range(n_stacks-1):
-        h = Dense(dims[i + 1], activation=act, kernel_initializer=init, name='encoder_%d' % i)(h)
-
-    h = Dense(dims[-1], kernel_initializer=init, name='encoder_%d' % (n_stacks - 1))(h)
-
-    y = h
-    for i in range(n_stacks-1, 0, -1):
-        y = Dense(dims[i], activation=act, kernel_initializer=init, name='decoder_%d' % i)(y)
-
-    y = Dense(dims[0], kernel_initializer=init, name='decoder_0')(y)
-
-    return Model(inputs=x, outputs=y, name='AE'), Model(inputs=x, outputs=h, name='encoder')
 
 class DEC(object):
     def __init__(self, dims, init='glorot_uniform'):
@@ -47,150 +32,263 @@ class DEC(object):
         self.n_stacks = len(self.dims) - 1
 
         self.pretrained = False
-        self.autoencoder, self.encoder = autoencoder(self.dims, init=init)
+        self.autoencoder = None
+        self.encoder = None
 
-    def pretrain(self, x, optimizer='adam', epochs=200, batch_size=256, save_dir='results/temp', verbose=1):
-        """
-        Pretraining method adapted for genomic data.
-        """
+    def initialize_model(self, save_dir):
+        """Check if pretrained models exist, load them if available, otherwise create new models."""
+        autoencoder_path = os.path.join(save_dir, 'autoencoder_model.h5')
+        encoder_path = os.path.join(save_dir, 'encoder_model.h5')
+
+        if os.path.exists(autoencoder_path) and os.path.exists(encoder_path):
+            print("Loading existing models...")
+            self.autoencoder = load_model(autoencoder_path)
+            self.encoder = load_model(encoder_path)
+            self.pretrained = True
+            print("Models loaded successfully.")
+        else:
+            print("No existing models found. Creating new models...")
+            self.autoencoder, self.encoder = autoencoder(self.dims, init=self.init)
+            self.pretrained = False
+
+    def pretrain(self, x, x_val, optimizer='adam', epochs=200, batch_size=256, save_dir='results/temp', verbose=1):
+        if self.pretrained:
+            print("Models already pretrained. Skipping pretraining.")
+            return None
+
         print('Pretraining......')
-        self.autoencoder.compile(optimizer=optimizer, loss='mse')
+        self.autoencoder.compile(optimizer=optimizer, loss='binary_crossentropy')
 
-        csv_logger = callbacks.CSVLogger(save_dir + '/pretrain_log.csv')
-        cb = [csv_logger]
+        csv_logger = callbacks.CSVLogger(os.path.join(save_dir, 'pretrain_log.csv'))
+        early_stopping = callbacks.EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True)
+        cb = [csv_logger, early_stopping]
 
         t0 = time()
-        self.autoencoder.fit(x, x, batch_size=batch_size, epochs=epochs, callbacks=cb, verbose=verbose)
+        history = self.autoencoder.fit(x, x, validation_data=(x_val, x_val),  batch_size=batch_size, epochs=epochs, callbacks=cb, verbose=verbose)
         print('Pretraining time: ', time() - t0)
-        self.autoencoder.save_weights(save_dir + '/ae_weights.h5')
-        print('Pretrained weights are saved to %s/ae_weights.h5' % save_dir)
-        self.pretrained = True
 
-    def fit(self, x, save_dir='./results/temp'):
-        """
-        Clustering method adapted for genomic data.
-        """
-        t1 = time()
-        print('******************** Use Denmune to Cluster ************************')
+        self.autoencoder.save_weights(os.path.join(save_dir, 'ae_weights.h5'))
+        print('Pretrained weights are saved to %s/ae_weights.h5' % save_dir)
+
+        autoencoder_path = os.path.join(save_dir, 'autoencoder_model.h5')
+        encoder_path = os.path.join(save_dir, 'encoder_model.h5')
+        self.autoencoder.save(autoencoder_path)
+        self.encoder.save(encoder_path)
+        print(f'Full autoencoder and encoder models are saved to {save_dir}')
+
+        self.pretrained = True
+        return history
+
+    def stratified_sample(self, X, labels, sample_size):
+        unique_labels = np.unique(labels)
+        n_clusters = len(unique_labels)
+
+        # Determine samples per cluster
+        samples_per_cluster = max(sample_size // n_clusters, 1)
+
+        sampled_X = []
+        sampled_labels = []
+
+        for label in unique_labels:
+            cluster_X = X[labels == label]
+            cluster_size = len(cluster_X)
+
+            # If cluster is smaller than samples_per_cluster, take all points
+            if cluster_size <= samples_per_cluster:
+                sampled_X.append(cluster_X)
+                sampled_labels.extend([label] * cluster_size)
+            else:
+                cluster_sample = resample(cluster_X, n_samples=samples_per_cluster, replace=False)
+                sampled_X.append(cluster_sample)
+                sampled_labels.extend([label] * samples_per_cluster)
+
+        return np.vstack(sampled_X), np.array(sampled_labels)
+
+    def calculate_dunn_index(self, X, labels):
+        unique_labels = np.unique(labels)
+        n_clusters = len(unique_labels)
+
+        if n_clusters == 1:
+            return 0
+
+        min_inter_cluster_distance = np.inf
+        max_intra_cluster_distance = 0
+
+        for i, label in enumerate(unique_labels):
+            cluster_points = X[labels == label]
+
+            if len(cluster_points) > 1:
+                # Calculate max intra-cluster distance
+                distances = pdist(cluster_points)
+                max_intra_cluster_distance = max(max_intra_cluster_distance, np.max(distances))
+
+            # Calculate min inter-cluster distance
+            for other_label in unique_labels[i+1:]:
+                other_cluster_points = X[labels == other_label]
+                inter_distances = cdist(cluster_points, other_cluster_points)
+                min_inter_cluster_distance = min(min_inter_cluster_distance, np.min(inter_distances))
+
+        return min_inter_cluster_distance / max_intra_cluster_distance if max_intra_cluster_distance > 0 else 0
+
+    def improved_dunn_index(self, X, labels, sample_size=1000, n_runs=1):
+        dunn_indices = []
+
+        for _ in range(n_runs):
+            sampled_X, sampled_labels = self.stratified_sample(X, labels, sample_size)
+            dunn_index = self.calculate_dunn_index(sampled_X, sampled_labels)
+            dunn_indices.append(dunn_index)
+
+        return np.mean(dunn_indices)
+
+    def evaluate_clustering(self, X, labels):
+        # Ensure X and labels are numpy arrays
+        X = np.array(X)
+        labels = np.array(labels)
+
+        noise_labels = [-1, -2]  # Consider both -1 and -2 as noise
+        label_counts = Counter(labels)
+        valid_labels = [label for label, count in label_counts.items() if count > 1 and label not in noise_labels]
+        n_clusters = len(valid_labels)
+
+        if n_clusters <= 1:
+            print("Warning: No valid clusters found (clusters with more than one point, excluding noise).")
+            return {
+                "n_clusters": n_clusters,
+                "dbcv_score": np.nan,
+                "cdbw_score": np.nan,
+                "cluster_sizes": dict(label_counts),
+                "valid_cluster_sizes": {},
+                "noise_points": sum(label_counts[l] for l in noise_labels),
+                "dbcv_error": "Not enough valid clusters",
+                "cdbw_error": "Not enough valid clusters"
+            }
+
+        # Filter out single-point clusters and noise points
+        mask = np.isin(labels, valid_labels)
+        X_filtered = X[mask]
+        labels_filtered = labels[mask]
+
+        # Check if we have any valid data points left
+        if len(X_filtered) == 0:
+            print("Warning: No valid data points left after filtering.")
+            return {
+                "n_clusters": 0,
+                "dbcv_score": np.nan,
+                "cdbw_score": np.nan,
+                "cluster_sizes": dict(label_counts),
+                "valid_cluster_sizes": {},
+                "noise_points": sum(label_counts[l] for l in noise_labels),
+                "dbcv_error": "No valid data points after filtering",
+                "cdbw_error": "No valid data points after filtering"
+            }
+
+        # Recalculate label_counts after filtering
+        label_counts_filtered = Counter(labels_filtered)
+
+        # Calculate DBCV score
+        dbcv_error = None
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                dbcv_score = dbcv.dbcv(X_filtered, labels_filtered, n_processes=1, noise_id=None)
+        except Exception as e:
+            print(f"Warning: DBCV calculation failed. Error: {str(e)}")
+            dbcv_score = np.nan
+            dbcv_error = str(e)
+
+        # Calculate CDbw score
+        cdbw_error = None
+        try:
+            cdbw_calculator = CDbw(X_filtered, labels_filtered, metric="euclidean", alg_noise='comb', intra_dens_inf=False, s=3, multipliers=False)
+            cdbw_score = cdbw_calculator
+        except Exception as e:
+            print(f"Warning: CDbw calculation failed. Error: {str(e)}")
+            cdbw_score = np.nan
+            cdbw_error = str(e)
+
+        return {
+            "n_clusters": n_clusters,
+            "dbcv_score": dbcv_score,
+            "cdbw_score": cdbw_score,
+            "cluster_sizes": dict(label_counts),
+            "valid_cluster_sizes": dict(label_counts_filtered),
+            "noise_points": sum(label_counts[l] for l in noise_labels),
+            "dbcv_error": dbcv_error,
+            "cdbw_error": cdbw_error
+        }
+
+    def fit(self, x, knn_values, seeds, save_dir='./results/temp'):
+        print('******************** Use DenMune to Cluster ************************')
 
         features = self.encoder.predict(x)
         np.savetxt(os.path.join(save_dir, 'full_features.txt'), features)
 
-        # Define the t-SNE configurations
         n_components = 2
         perplexity = 30
-        random_state = 42
-        n_jobs=40
 
-        # Define t-SNE approaches to benchmark
-        tsne_approaches = {
-            #'MulticoreTSNE': {'class': MulticoreTSNE, 'features': None, 'time': None},
-            'scikit-learn': {'class': sklearn_TSNE, 'features': None, 'time': None},
-#            'openTSNE': {'class': openTSNE, 'features': None, 'time': None},
-        }
+        results = {}
 
-        # Benchmark each t-SNE approach
-        for name, tsne_info in tsne_approaches.items():
-            start_time = time()
-            if name == 'openTSNE':
-                tsne_instance = tsne_info['class'](n_components=n_components, perplexity=perplexity, random_state=random_state, n_jobs=n_jobs)
-                features_transformed = tsne_instance.fit(features)
-            else:
-                tsne_instance = tsne_info['class'](n_components=n_components, perplexity=perplexity, random_state=random_state, n_jobs=n_jobs)
-                features_transformed = tsne_instance.fit_transform(features)
+        for seed in seeds:
+            print(f"Start t-SNE for seed = {seed}")
+            tsne_instance = sklearn_TSNE(n_components=n_components, perplexity=perplexity, random_state=seed, n_jobs=-1)
+            features_transformed = tsne_instance.fit_transform(features)
 
-            tsne_time = time() - start_time
-            tsne_info['features'] = features_transformed
-            tsne_info['time'] = tsne_time
-            np.savetxt(os.path.join(save_dir, f'features_{name}.txt'), features_transformed)
-            print(f"{name} t-SNE took {tsne_time:.2f} seconds.")
+            tsne_file = os.path.join(save_dir, f'tsne_features_seed_{seed}.txt')
+            np.savetxt(tsne_file, features_transformed)
 
-        # Process each t-SNE approach's results
-        for name, tsne_info in tsne_approaches.items():
-            features_transformed = tsne_info['features']
-            #y_pred, center_num, dc_percent, dc = DenPeakCluster(features_transformed)
-            print("Start clustering with DenMune")
-            knn = 20 # k-nearest neighbor, the only parameter required by the algorithm
-            X_train = pd.DataFrame(features_transformed)
-#            print(X_train.shape)
-#            print(features.shape)
+            seed_results = {}
 
-            dm = DenMune(train_data=X_train, k_nearest=knn)
-            y_pred, validity = dm.fit_predict(show_analyzer=False, show_noise=True)
-            y_pred = y_pred['train']
-            # Plotting
-            cmap = 'viridis'
+            for knn in knn_values:
+                print(f"Clustering for k = {knn}, seed = {seed}")
+                X_df = pd.DataFrame(features_transformed)
+                dm = DenMune(
+                    train_data=X_df,
+                    k_nearest=knn,
+                    file_2d=tsne_file
+                )
+                y_pred, _ = dm.fit_predict(show_analyzer=False, show_noise=True)
 
-            plt.cla()
-            plt.scatter(features_transformed[:, 0], features_transformed[:, 1], c=y_pred, cmap=cmap, s=0.5, alpha=0.5)
-            plt.savefig(os.path.join(save_dir, f'2D_{name}.png'), dpi=600)
+                if y_pred is None or 'train' not in y_pred or len(y_pred['train']) == 0:
+                    print(f"Warning: Clustering failed for k={knn}, seed={seed}")
+                    seed_results[knn] = {
+                        "n_clusters": 0,
+                        "dbcv_score": np.nan,
+                        "cdbw_score": np.nan,
+                        "cluster_sizes": {},
+                        "valid_cluster_sizes": {},
+                        "noise_points": 0,
+                        "dbcv_error": "Clustering failed",
+                        "cdbw_error": "Clustering failed"
+                    }
+                else:
+                    y_pred = np.array(y_pred['train'])  # Ensure y_pred is a numpy array
+                    np.savetxt(os.path.join(save_dir, f'predicted_clusters_knn_{knn}_seed_{seed}.txt'), y_pred)
+                    #eval_metrics = self.evaluate_clustering(features, y_pred)
+                    #seed_results[knn] = eval_metrics
 
-            # Code for 3D plotting
-            #fig = plt.figure()
-            #ax = fig.add_subplot(111, projection='3d')  # Creating a 3D subplot
+                # Save clustering results
+                #with open(os.path.join(save_dir, f'clustering_results_seed_{seed}_knn_{knn}.csv'), 'w', newline='') as csvfile:
+                #    writer = csv.writer(csvfile)
+                #    writer.writerow(['metric', 'value'])
+                #    for key, value in eval_metrics.items():
+                #        writer.writerow([key, value])
 
-            # Scatter plot in 3D, assuming features_transformed has at least three columns for x, y, z coordinates
-            #ax.scatter(features_transformed[:, 0], features_transformed[:, 1], features_transformed[:, 2], c=y_pred, s=0.5)  # Adjust marker size as needed
+                # Plotting
+                plt.figure(figsize=(10, 8))
+                plt.scatter(features_transformed[:, 0], features_transformed[:, 1], c=y_pred, cmap='viridis', s=0.5, alpha=0.5)
+                plt.title(f't-SNE and Clustering Results (k={knn}, seed={seed}, n_clusters={eval_metrics["n_clusters"]})')
+                plt.savefig(os.path.join(save_dir, f'2D_plot_knn_{knn}_seed_{seed}.png'), dpi=600)
+                plt.close()
 
-            # Saving the 3D plot. Adjust file name as needed.
-            #plt.savefig(os.path.join(save_dir, f'3D_{name}.png'), dpi=600)
+            results[seed] = seed_results
 
-            # Clear the current figure's plotting area to prevent overlap with future plots (optional)
-            #plt.clf()
+        # Print summary of results
+        print("\nClustering Evaluation Summary:")
+        for seed, seed_results in results.items():
+            print(f"\nFor seed={seed}:")
+            for knn, metrics in seed_results.items():
+                print(f"  k={knn}:")
+                for metric, value in metrics.items():
+                    print(f"    {metric}: {value}")
 
-            #fig = go.Figure(data=[go.Scatter3d(
-            #            x=features_transformed[:, 0],  # X coordinates
-            #            y=features_transformed[:, 1],  # Y coordinates
-            #            z=features_transformed[:, 2],  # Z coordinates
-            #            mode='markers',
-            #            marker=dict(
-            #                        size=5,  # Marker size
-            #                        color=y_pred,  # Assigning colors based on y_pred
-            #                        colorscale='Viridis',  # Color scale for markers
-            #                        opacity=0.8  # Marker opacity
-            #            )
-           # )])
-
-            # Customize the layout
-            #fig.update_layout(
-            #            title='3D Scatter Plot',
-            #            scene=dict(
-            #                        xaxis_title='X Axis',
-            #                        yaxis_title='Y Axis',
-            #                        zaxis_title='Z Axis'
-            #            ),
-            #            autosize=False,
-            #            width=800,
-            #            height=600,
-            #)
-
-            # The file path for saving
-            #file_path = os.path.join(save_dir, f'3D_{name}.html')
-
-            # Save the plot as an interactive HTML file
-            #fig.write_html(file_path)
-
-            # Saving data
-            #np.savetxt(os.path.join(save_dir, f'features_{name}.txt'), features_transformed)
-            np.savetxt(os.path.join(save_dir, f'predicted_clusters_{name}.txt'), y_pred)
-
-            # Log clustering info for each approach
-            #log_info = {
-            #    'TSNE Approach': name,
-            #    'Total Clusters': center_num,
-            #    'DC Percent': dc_percent,
-            #    'DC Value': dc,
-            #    'n jobs': n_jobs,
-            #    'Clustering Time': tsne_info['time'],
-            #    'Total Time': time() - t1
-            #}
-
-            #with open(os.path.join(save_dir, f'log_{name}.csv'), 'a', newline='') as logfile:
-            #        logwriter = csv.DictWriter(logfile, fieldnames=log_info.keys())
-            #        if logfile.tell() == 0:  # Check if file is empty to write header
-            #                logwriter.writeheader()
-            #        logwriter.writerow(log_info)
-
-        print('Clustering completed and results saved.')
-
-        return y_pred
+        return results
