@@ -17,15 +17,15 @@
 
 ## Introduction
 
-This project implements a sophisticated Deep Embedded Clustering (DEC) approach for analyzing genomic data. It combines the power of autoencoders for dimensionality reduction with advanced clustering techniques to uncover patterns in high-dimensional genomic datasets. The project is particularly designed to work with one-hot encoded genomic data, making it suitable for a wide range of genomic analysis tasks.
+This project implements Deep Embedded Clustering (DEC) approach for analyzing genomic data. It combines the power of autoencoders for dimensionality reduction and information extraction with density based clustering techniques to uncover patterns in high-dimensional genomic datasets. The project is particularly designed to work with one-hot encoded genomic data, making it suitable for a wide range of genomic analysis tasks.
 
 The main goals of this project are:
-1. To reduce the dimensionality of complex genomic data using deep autoencoders
+1. To reduce the dimensionality of complex genomic data while keeping relevant information and "diluting" bias using deep autoencoders
 2. To perform clustering on the reduced-dimension data to identify meaningful groups or patterns
 3. To visualize the clustered data using t-SNE for intuitive interpretation
-4. To evaluate the quality of clustering using various metrics
+4. To select the optimal hyperparameter for the Density-based clustering approach used
 
-This project is ideal for researchers and data scientists working in bioinformatics, genomics, and related fields who need to analyze large-scale genomic datasets efficiently.
+This project is for researchers and data scientists working in bioinformatics, genomics, and related fields who need to analyze large-scale genomic datasets efficiently.
 
 ## Project Structure
 
@@ -50,13 +50,13 @@ The project is organized into several Python scripts, each handling a specific a
 This is the main entry point of the project. It orchestrates the entire analysis pipeline and provides a command-line interface for running the autoencoder training and clustering processes. Key features include:
 
 - Flexible configuration through command-line arguments
-- Support for multiple trials and cross-validation folds
+- Support for multiple trials and cross-validation folds (Seeds are set for reproducibility and, therefore, folds can be done in parallel.)
 - Ability to run specific combinations of trials, folds, and encoding dimensions
 - Comprehensive logging and result saving
 
 ### DenseDEC.py
 
-This script implements the Dense Deep Embedded Clustering model, which is a variation of the DEC algorithm optimized for dense data like genomic sequences. It includes:
+This script implements the Dense Deep Embedded Clustering model, which is a variation of the DEC algorithm. It includes:
 
 - A custom dense autoencoder architecture
 - Methods for initializing and pretraining the autoencoder
@@ -68,7 +68,7 @@ This script contains the base implementation of the Deep Embedded Clustering alg
 
 - Methods for model initialization and pretraining
 - Implementation of the DenMune clustering algorithm
-- Functions for evaluating clustering quality using various metrics (DBCV, CDbw)
+- Functions for evaluating clustering quality using various metrics (DBCV, CDbw) #### TO BE FIXED
 - Utilities for data sampling and visualization
 
 ### datasets.py
@@ -93,7 +93,7 @@ This utility script handles data loading and preprocessing. It includes:
    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
    ```
 
-3. Install the required dependencies:
+3. Install the required dependencies (FINAL DEPENDECIES FILES WILL BE EXPORTED):
    ```
    pip install tensorflow keras numpy pandas scikit-learn matplotlib denmune
    ```
