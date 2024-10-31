@@ -10,6 +10,7 @@ from time import time
 from sklearn.model_selection import KFold
 from keras.models import load_model
 import tensorflow as tf
+from cluster_evaluation import run_evaluation # Currently running eval mode ! ##  I am not running cluster eval now and NUMPY is problematic
 
 def clear_session():
     tf.keras.backend.clear_session()
@@ -129,7 +130,14 @@ def run_clustering_mode(dbs, expdir, knn_values=[5, 10, 15, 20], seeds=[42, 123,
         init = VarianceScaling(scale=1. / 3., mode='fan_in', distribution='uniform', seed=123)
 
         for trial in os.listdir(db_dir):
-            if specific_trial is not None and int(trial.replace('trial', '')) != specific_trial:
+            if not trial.startswith('trial'):
+                continue
+            try:
+                trial_number = int(trial.replace('trial', ''))
+            except ValueError:
+                continue  # Skip if not a valid trial folder
+
+            if specific_trial is not None and trial_number != specific_trial:
                 continue
 
             trial_dir = os.path.join(db_dir, trial)
@@ -185,25 +193,107 @@ def run_clustering_mode(dbs, expdir, knn_values=[5, 10, 15, 20], seeds=[42, 123,
                         continue
 
                     print(f"Running clustering for {dim_dir} with {len(combinations_to_run)} combinations")
-                    clustering_results = model.fit(x, knn_values=[knn for _, knn in combinations_to_run],
-                                                   seeds=[seed for seed, _ in combinations_to_run],
-                                                   save_dir=dim_dir)
-
-                    # Save clustering results
-                    for seed, seed_results in clustering_results.items():
-                        for knn, metrics in seed_results.items():
-                            results_file = os.path.join(dim_dir, f'clustering_results_seed_{seed}_knn_{knn}.csv')
-                            with open(results_file, 'w', newline='') as csvfile:
-                                writer = csv.writer(csvfile)
-                                writer.writerow(['metric', 'value'])
-                                for key, value in metrics.items():
-                                    writer.writerow([key, value])
+                    model.fit(x, knn_values=[knn for _, knn in combinations_to_run], seeds=[seed for seed, _ in combinations_to_run], save_dir=dim_dir)
 
                     clear_session()
 
+def run_cluster_evaluation_mode(dbs, expdir, knn_values=[5, 10, 15, 20], seeds=[42, 123, 456, 789, 101], encoding_dims=[64, 128, 256], specific_trial=None, specific_fold=None, specific_dim=None, specific_seed=None, specific_knn=None):
+    cumulative_results_file = os.path.join(expdir, 'cumulative_clustering_evaluation.csv')
+    cumulative_results_exists = os.path.exists(cumulative_results_file)
+
+    with open(cumulative_results_file, 'a', newline='') as cumulative_file:
+        fieldnames = ['db', 'trial', 'fold', 'dim', 'seed', 'knn', 'n_clusters', 'dbcv_score', 'cdbw_score', 'silhouette_score', 'calinski_harabasz_score', 'davies_bouldin_score', 'dunn_index', 'noise_points']
+        writer = csv.DictWriter(cumulative_file, fieldnames=fieldnames)
+
+        if not cumulative_results_exists:
+            writer.writeheader()
+
+        for db in dbs:
+            db_dir = os.path.join(expdir, db)
+
+            trials_to_process = [specific_trial] if specific_trial is not None else range(5)  # Assume 5 trials if not specified
+            for trial in trials_to_process:
+                trial_dir = os.path.join(db_dir, f'trial{trial}')
+
+                folds_to_process = [specific_fold] if specific_fold is not None else range(4)  # Assume 4 folds if not specified
+                for fold in folds_to_process:
+                    fold_dir = os.path.join(trial_dir, f'fold{fold}')
+
+                    dims_to_process = [specific_dim] if specific_dim is not None else encoding_dims
+                    for dim in dims_to_process:
+                        dim_dir = os.path.join(fold_dir, f'dim{dim}')
+
+                        seeds_to_process = [specific_seed] if specific_seed is not None else seeds
+                        for seed in seeds_to_process:
+                            feature_file = os.path.join(dim_dir, f'tsne_features_seed_{seed}.txt')
+
+                            if not os.path.exists(feature_file):
+                                print(f"Feature file not found: {feature_file}")
+                                continue
+
+                            X = np.loadtxt(feature_file)
+
+                            knns_to_process = [specific_knn] if specific_knn is not None else knn_values
+                            for knn in knns_to_process:
+                                cluster_file = os.path.join(dim_dir, f'predicted_clusters_knn_{knn}_seed_{seed}.txt')
+
+                                if not os.path.exists(cluster_file):
+                                    print(f"Cluster file not found: {cluster_file}")
+                                    continue
+
+                                y = np.loadtxt(cluster_file)
+
+                                print(f"Evaluating: DB={db}, Trial={trial}, Fold={fold}, Dim={dim}, Seed={seed}, KNN={knn}")
+
+                                eval_results = run_evaluation(X, y)
+
+                                # Save individual result
+                                individual_result_file = os.path.join(dim_dir, f'evaluation_result_knn_{knn}_seed_{seed}.csv')
+                                with open(individual_result_file, 'w', newline='') as ind_file:
+                                    ind_writer = csv.DictWriter(ind_file, fieldnames=fieldnames)
+                                    ind_writer.writeheader()
+                                    ind_writer.writerow({
+                                        'db': db,
+                                        'trial': trial,
+                                        'fold': fold,
+                                        'dim': dim,
+                                        'seed': seed,
+                                        'knn': knn,
+                                        'n_clusters': eval_results['n_clusters'],
+                                        'dbcv_score': eval_results['dbcv_score'],
+                                        'cdbw_score': eval_results['cdbw_score'],
+                                        'silhouette_score': eval_results['silhouette_score'],
+                                        'calinski_harabasz_score': eval_results['calinski_harabasz_score'],
+                                        'davies_bouldin_score': eval_results['davies_bouldin_score'],
+                                        'dunn_index': eval_results['dunn_index'],
+                                        'noise_points': eval_results['noise_points']
+                                    })
+
+                                # Append to cumulative results
+                                writer.writerow({
+                                    'db': db,
+                                    'trial': trial,
+                                    'fold': fold,
+                                    'dim': dim,
+                                    'seed': seed,
+                                    'knn': knn,
+                                    'n_clusters': eval_results['n_clusters'],
+                                    'dbcv_score': eval_results['dbcv_score'],
+                                    'cdbw_score': eval_results['cdbw_score'],
+                                    'silhouette_score': eval_results['silhouette_score'],
+                                    'calinski_harabasz_score': eval_results['calinski_harabasz_score'],
+                                    'davies_bouldin_score': eval_results['davies_bouldin_score'],
+                                    'dunn_index': eval_results['dunn_index'],
+                                    'noise_points': eval_results['noise_points']
+                                })
+
+                                cumulative_file.flush()  # Ensure the results are written immediately
+
+    print(f"Cluster evaluation completed. Cumulative results saved to {cumulative_results_file}")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run autoencoder training or clustering on genomic data.")
-    parser.add_argument("mode", choices=["autoencoder", "clustering"], help="Mode to run: 'autoencoder' or 'clustering'")
+    parser = argparse.ArgumentParser(description="Run autoencoder training, clustering, or cluster evaluation on genomic data.")
+    parser.add_argument("mode", choices=["autoencoder", "clustering", "cluster_evaluation"], help="Mode to run: 'autoencoder', 'clustering', or 'cluster_evaluation'")
     parser.add_argument("--dbs", nargs='+', default=['prokka_onehot_nay60k_1000', 'prokka_onehot_allGUT_combined', 'humags_prokka_onehotencoded_dataset'], help="List of databases to process")
     parser.add_argument("--expdir", default='results/genomic_exp', help="Directory to save results")
     parser.add_argument("--trials", type=int, default=2, help="Number of trials (for autoencoder mode)")
@@ -214,6 +304,8 @@ if __name__ == "__main__":
     parser.add_argument("--specific_trial", type=int, help="Specific trial to run")
     parser.add_argument("--specific_fold", type=int, help="Specific fold to run")
     parser.add_argument("--specific_dim", type=int, help="Specific encoding dimension to run")
+    parser.add_argument("--specific_seed", type=int, help="Specific seed to use for evaluation")
+    parser.add_argument("--specific_knn", type=int, help="Specific KNN value to use for evaluation")
 
     args = parser.parse_args()
 
@@ -223,3 +315,7 @@ if __name__ == "__main__":
     elif args.mode == "clustering":
         run_clustering_mode(args.dbs, expdir=args.expdir, knn_values=args.knn_values, seeds=args.seeds, encoding_dims=args.encoding_dims,
                             specific_trial=args.specific_trial, specific_fold=args.specific_fold, specific_dim=args.specific_dim)
+    elif args.mode == "cluster_evaluation":
+        run_cluster_evaluation_mode(args.dbs, expdir=args.expdir, knn_values=args.knn_values, seeds=args.seeds, encoding_dims=args.encoding_dims,
+                                    specific_trial=args.specific_trial, specific_fold=args.specific_fold, specific_dim=args.specific_dim,
+                                    specific_seed=args.specific_seed, specific_knn=args.specific_knn)
