@@ -6,16 +6,24 @@ from DEC import DEC
 
 def DenseAutoencoder(input_dim, encoding_dim=64):
     """
-    Creates a dense autoencoder with a four-layer encoder. The encoder reduces dimensionality smoothly
-    from the input dimension to the encoding dimension, and the decoder symmetrically reconstructs back to the input dimension.
+    Creates a dense autoencoder with a four-layer encoder for large binary input.
+    The encoder reduces dimensionality smoothly from the input dimension to the encoding dimension,
+    and the decoder symmetrically reconstructs back to the input dimension.
+
+    Args:
+    input_dim (int): The input dimension, expected to be large (around 40000)
+    encoding_dim (int): The encoding dimension, default is 64
+
+    Returns:
+    tuple: (autoencoder, encoder) - The full autoencoder model and the encoder part
     """
     init = VarianceScaling(scale=1. / 3., mode='fan_in', distribution='uniform')
     model = Sequential()
 
     # Determine intermediate dimensions for a smoother transition
-    inter_dim1 = max(encoding_dim * 4, int(input_dim / 2))
-    inter_dim2 = max(encoding_dim * 2, int(inter_dim1 / 2))
-    inter_dim3 = encoding_dim * 2  # Closer to the latent space but higher than the final encoding dimension
+    inter_dim1 = min(max(encoding_dim * 32, input_dim // 4), input_dim // 2)
+    inter_dim2 = min(max(encoding_dim * 16, input_dim // 8), inter_dim1 // 2)
+    inter_dim3 = min(max(encoding_dim * 8, input_dim // 16), inter_dim2 // 2)
 
     # Encoder
     model.add(Dense(inter_dim1, input_dim=input_dim, kernel_initializer=init))
@@ -50,7 +58,7 @@ def DenseAutoencoder(input_dim, encoding_dim=64):
     model.add(Dense(input_dim, activation='sigmoid', kernel_initializer=init))
 
     # Extract the encoder part of the model
-    encoder = Model(inputs=model.input, outputs=model.layers[7].output)
+    encoder = Model(inputs=model.input, outputs=model.get_layer(index=11).output)
 
     return model, encoder
 
