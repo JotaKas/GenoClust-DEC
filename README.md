@@ -93,10 +93,7 @@ This utility script handles data loading and preprocessing. It includes:
    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
    ```
 
-3. Install the required dependencies (FINAL DEPENDECIES FILES WILL BE EXPORTED):
-   ```
-   pip install tensorflow keras numpy pandas scikit-learn matplotlib denmune
-   ```
+3. Install the required dependencies 
 
    Note: Depending on your system and CUDA compatibility, you might need to install a specific version of TensorFlow. Refer to the [TensorFlow installation guide](https://www.tensorflow.org/install) for more details.
 
